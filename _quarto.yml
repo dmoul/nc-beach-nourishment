@@ -1,0 +1,34 @@
+project:
+  type: book
+
+book:
+  title: "NC beach nourishment"
+  author: Daniel Moul
+  date: today
+  cover-image: "./images/freeman-park-beach-nc-IMG_1330.jpg"
+  cover-image-alt: "Freeman Park Beach just north of Carolina Beach, North Carolina. March 2024. Photo: Daniel Moul."
+  
+  chapters:
+    - "index.qmd"
+    - "nourishment-episodes.qmd"
+    - "notes.qmd"
+  page-footer: 
+    center: "Copyright 2024 by [Daniel Moul](https://dmoul.github.io). License: [CC-BY 4.0](http://creativecommons.org/licenses/by/4.0/)"
+    background: dark
+
+license: "CC BY"
+  
+execute: 
+  freeze: auto # re-render only when source changes
+
+format:
+  html:
+    theme: cosmo
+    code-fold: true
+    number-sections: true
+    code-summary: "Show the code"
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    title-block-banner: true
+
