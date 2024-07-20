@@ -10,7 +10,7 @@ Thanks to the people and organizations that made data available
 
 - [Program for the Study of Developed Shorelines](https://beachnourishment.wcu.edu) at Western Carolina University
 - NOAA shoreline GIS data from the [Global Self-consistent, Hierarchical, High-resolution Geography Database (GSHHG)](https://www.ngdc.noaa.gov/mgg/shorelines/)
-- U.S. Census TIGRIS database (accessed via the tidycensus packaga)
+- U.S. Census TIGRIS database (accessed via the tidycensus package)
 - [GeoNames](https://www.geonames.org) lookup service
 - Hat tip to Jeremy Signer-Vine for Data Is Plural [2024.07.03 edition](https://www.data-is-plural.com/archive/2024-07-03-edition/), where I learned about the beach nourishment data.
 
