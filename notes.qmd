@@ -1,0 +1,129 @@
+# Notes 
+
+## NC beach nourishment data
+
+The data comes from from <https://beachnourishment.wcu.edu>, specifically <https://beachnourishment.wcu.edu/state/NC>. I downloaded PSDS-NC-20240705.xlsx on 2024-07-05 after agreeing to terms and conditions^[Agreement before downloading data from <https://beachnourishment.wcu.edu>:
+This is a legal agreement between you, the end-user ("User") and the Program for the Study of Developed Shorelines at Western Carolina University (“PSDS”). By downloading the data made available on this web site ("Data") you are agreeing to be bound by the terms and conditions of this agreement. If you do not agree to be bound by these terms, do not download or use the Data.
+PSDS hereby grants to the User a non-exclusive, revocable, limited, non-transferable license to use the Data solely for (1) research, scholarly or academic purposes, (2) the internal use of your business, or (3) your own personal non-commercial use. You may not reproduce, sell, rent, lease, loan, distribute or sublicense or otherwise transfer any Data, in whole or in part, to any other party, or use the Data to create any derived product for resale, lease or license. Notwithstanding the foregoing, you may incorporate limited portions of the Data in scholarly, research or academic publications or for the purposes of news reporting, provided you acknowledge the source of the Data (with an express reference to The Program for the Study of Developed Shorelines at Western Carolina University).
+THE DATA IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, ARISING BY LAW OR OTHERWISE, INCLUDING BUT NOT LIMITED TO WARRANTIES OF COMPLETENESS, NON-INFRINGEMENT, ACCURACY, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE. THE USER ASSUMES ALL RISK ASSOCIATED WITH USE OF THE DATA AND AGREES THAT IN NO EVENT SHALL PSDS BE LIABLE TO YOU OR ANY THIRD PARTY FOR ANY INDIRECT, SPECIAL, INCIDENTAL, PUNITIVE OR CONSEQUENTIAL DAMAGES OR OTHER FINANCIAL LOSS ARISING OUT OF THE USE OF, OR INABILITY TO USE, THE DATA BASED ON ANY THEORY OF LIABILITY INCLUDING, BUT NOT LIMITED TO, BREACH OF CONTRACT, BREACH OF WARRANTY, TORT (INCLUDING NEGLIGENCE), OR OTHERWISE, EVEN IF USER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+This license will terminate (1) automatically without notice from PSDS if you fail to comply with the provisions of this agreement, or (2) upon written notice (by e-mail, U.S. or otherwise) from PSDS. Upon termination of this agreement, you agree to destroy all copies of any Data, in whole or in part and in any and all media, in your custody and control.
+The Program for the Study of Developed Shorelines (PSDS) Beach Nourishment Viewer is a public resource of general information. PSDS makes no warranty, representation or guaranty as to the content, sequence, accuracy, timeliness or completeness of any of the database information provided herein. The reader should not rely on the data provided herein for any reason. Geographic information is believed to be accurate but accuracy is not guaranteed, and the information contained herein is not to be construed or used as a "legal description." Any errors or omissions should be reported to Andy Coburn (acoburn\@wcu.edu). In no event will PSDS be liable for any damages, including loss of data, lost profits, business interruption, loss of business information or other pecuniary loss that might arise from the use of this site or the information it contains.]
+
+About the data: <https://beachnourishment.wcu.edu/glossary>
+
+
+## Coordinates of places receiving beach nourishment
+
+I manually transcribed the coordinates from <https://www.geonames.org/search.html>, which I learned about at <https://docs.ropensci.org/opencage/index.html>)
+
+
+## NOAA shoreline data
+
+From the Global Self-consistent, Hierarchical, High-resolution Geography Database (GSHHG) <https://www.ngdc.noaa.gov/mgg/shorelines/> I downloaded gshhg-shp-2.3.7.zip on 2024-07-07.
+
+
+## Simplifying categories {#sec-simplifying-categories}
+
+To reduce clutter I consolidated categorical data in the following ways:
+
+* One row with justification == 'Section 111' changed to 'Shore Protection'
+* Any rows with justification == "FEMA Emergency" changed to "Emergency"
+* Some locations simplified, e.g., "North Topsail Beach" and "South Topsail Beach" and "Topsail Island" changed to "Topsail".
+
+FYI: info on [Section 111](https://www.spn.usace.army.mil/Portals/68/docs/P%20and%20Programs/Cap%20Production%20Center/CAP%20111%20Fact%20Sheet.pdf?ver=qwTYeafFf4qBQqRxQ2dwAQ%3D%3D)
+
+
+## Not used
+
+I decided not to pursue the following data and map sources. I mention them here in case they are of interest to someone else.
+
+### NC Beach GIS data
+
+<https://data-nconemap.opendata.arcgis.com/datasets/560da2d6c7f64b188841946854176cd0/explore>
+
+<https://data-nconemap.opendata.arcgis.com/datasets/nconemap::2016-orthoimagery/about>
+
+**Summary**
+
+This service depicts true color imagery for the counties representing the coastal plain regions of North Carolina. The imagery has a pixel resolution of 6 inches and was flown in the beginning of 2016 as part of the North Carolina Orthoimagery Program.
+
+[**NOTE:**]{.underline} DO NOT DOWNLOAD THE IMAGERY BY USING THE MAP OR DOWNLOAD TOOLS ON THIS ARCGIS HUB ITEM PAGE. IT WILL RESULT IN A PIXELATED ORTHOIMAGE. INSTEAD, DOWNLOAD THE IMAGERY BY [**TILE**](https://nconemap.maps.arcgis.com/apps/webappviewer/index.html?id=2c8a9b366c4841f1be2b464347d04a2b) OR BY [COUNTY MOSAIC](https://www.nconemap.gov/#directdatadownloads) (2010 - current year).
+
+This service depicts true color imagery for the counties representing the coastal plain regions of North Carolina. The imagery has a pixel resolution of 6 inches and was flown in the beginning of 2016. The RMSE is 1.5 ft X and Y. Individual pixel values may have been altered during image processing. Therefore, this service should be used for general reference and viewing. Image analysis requiring examination of individual pixel values is discouraged. To view the latest imagery for any location in the state, customers should use the "Orthoimagery_Latest" image service (https://services.nconemap.gov/secure/rest/services/Imagery/Orthoimagery_Latest/ImageServer).
+
+
+### Shorelines of the central North Carolina (NCcentral) coastal region used in shoreline change analysis
+
+<https://www.sciencebase.gov/catalog/item/58b8913ee4b01ccd5500c312> offers NCcentral_shorelines.zip
+
+Purpose This dataset includes shorelines from 158 years ranging from 1852 to 2010 in central North Carolina's coastal region from Cape Hatteras to Cape Lookout. Shorelines were compiled from topographic survey sheets (T-sheets; National Oceanic and Atmospheric Administration (NOAA)), Coastal Engineering Research Center (CERC) maps (NOAA/National Ocean Service (NOS)), and lidar (U.S. Geological Survey (USGS)/NOAA/National Aeronautics and Space Administration (NASA), USGS/U.S. Army Corps of Engineers (USACE), USGS/NOAA/National Park Service (NPS)). Historical shoreline positions serve as easily understood features that can be used to describe the movement of beaches through time. These data are used to calculate rates of shoreline change for the U.S. Geological Survey's National Assessment of Shoreline Change Project. Rates of long-term and short-term shoreline change were generated in a GIS using the Digital Shoreline Analysis System (DSAS) version 4.3. DSAS uses a measurement baseline method to calculate rate-of-change statistics. Transects are cast from the reference baseline to intersect each shoreline, establishing measurement points used to calculate shoreline change rates. Map Map Preview Spatial Services ScienceBase WMS
+
+ScienceBase WFS
+
+Communities USGS Data Release Products Tags Categories Data Theme CERCCERC mapCMGPCoastal Engineering Research CenterCoastal and Marine Geology ProgramDSASDigital Shoreline Analysis SystemHWLHigh Water LineMHWMean High WaterNOAANOSNational Assessment of Shoreline Change ProjectNational Ocean ServiceNational Oceanic and Atmospheric AdministrationShorelineShoreline ChangeU.S. Army Corps of EngineersU.S. Geological SurveyUSACEUSGSWHCMSCWoods Hole Coastal and Marine Science CenterenvironmentgeoscientificInformationoceans Place Atlantic CoastCape HatterasCape LookoutGreen IslandHorsepen PointNCNorth AmericaNorth CarolinaOcracoke InletOcracoke IslandPortsmouth IslandUnited States Types CitationDownloadableMap ServiceOGC WFS LayerOGC WMS LayerShapefile Provenance Additional Information Shapefile Extension bounding Box" minY 34.58207999955906 minX -76.55571529595808 maxY 35.240721020799306 maxX -75.52057722483457
+
+
+### Other NOAA data (which I didn't explore)
+
+<https://search.usa.gov/search?affiliate=ngdc.noaa.gov&v%3Aproject=firstgov&query=NOAA%27s+Medium+Resolution+Digital+Vector+Shoreline&x=0&y=0>
+
+
+### Digital elevation model (DEM) of North Carolina
+
+DEM
+
+(scale may not be granular enough for low-lying coastal regions. In preview or Safari shows a black box)
+
+NC OneMap / State of North Carolina
+
+A digital elevation model (DEM) of North Carolina. The grid cell size is 3 feet.
+
+Type
+
+:   Image Service
+
+Date updated
+
+:   5/28/2024
+
+Tags
+
+:   NC, North Carolina, Department of Information Technology, NCDIT, Center for Geographic Information and Analysis, CGIA, elevation, dem, model, digital elevation model, 3_ft
+
+Categories
+
+:   Elevation
+
+<https://www.nconemap.gov/datasets/d0416b6d7b994575b2b60ce7491e02c6/explore?location=89.091222%2C-37.502400%2C0.00>
+
+
+### Oceanfront Construction Setback & Erosion Rates
+
+(can't find a way to download the data)
+
+<https://www.deq.nc.gov/about/divisions/coastal-management/coastal-management-oceanfront-shorelines/oceanfront-construction-setback-erosion-rate>
+
+
+### North Carolina State and County Boundary Polygons
+
+(I got this automatically via tidycensus / TIGRIS)
+
+<https://www.nconemap.gov/maps/9728285994804c8b9f20ce58bae45899>
+
+<https://www.nconemap.gov/datasets/NCEM-GIS::north-carolina-state-and-county-boundary-polygons/about>
+
+
+### NC Evacuation zones
+
+(doesn't really make the beaches obvious)
+
+<https://www.nconemap.gov/maps/775d408e4d0a4eae9e425f30d42674e0/explore?location=35.240809%2C-76.554993%2C8.53>
+
+
+### NC beach and waterfront access
+
+(doesn't have a "data download" option)
+
+<https://data-ncdenr.opendata.arcgis.com/apps/ncdenr::nc-beach-and-waterfront-access/about>
+
+<br>

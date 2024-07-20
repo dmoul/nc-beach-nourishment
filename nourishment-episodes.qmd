@@ -1,0 +1,1495 @@
+# Nourishment episodes
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(scales)
+library(glue)
+library(here)
+library(gt)
+library(gtExtras) # also loads svglite
+library(patchwork)
+library(sf)
+library(ggrepel)
+library(tidycensus)
+library(broom) # for tidy()
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(size = rel(2.0)),
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank())
+)
+
+options(tigris_use_cache = TRUE)
+sf_use_s2(FALSE)
+
+my_caption <- "Daniel Moul. Source: nourishment data from PSDS at WCU"
+my_caption_geo <- "Daniel Moul. Sources: nourishment data from PSDS at WCU; shorlines from NOAA; county lines from US Census TIGRIS"
+
+```
+
+```{r}
+#| label: prepare-data
+#| warning: false
+#| message: false
+
+
+###### Nourishment data
+
+d_raw_nourishment <- read_xlsx(here("data/raw/PSDS-NC-20240705.xlsx")) |>
+  clean_names() |>
+  mutate(across(where(is.character), ~ map_chr(.x, iconv, "UTF-8", "UTF-8", sub=''))) # just in case
+
+d_nourishment <- d_raw_nourishment |>
+  mutate(place = str_trim(str_extract(location, "([[:alpha:]][[:space:]]?)+")),
+         place = case_when(
+           str_detect(place, "Topsail")         ~ "Topsail",
+           place == "Emerald Isle Point"        ~ "Emerald Isle",
+           place == "Cape Hatteras"             ~ "Hatteras Island",
+           .default = place
+         )) |> 
+  relocate(place, .after = location) |>
+  mutate(justification = case_match(
+    justification,
+    "Section 111"          ~ "Shore Protection",
+    "FEMA Emergency"       ~ "Emergency",
+    .default = justification
+  ))
+
+d_rank_n <- d_nourishment |>
+  count(place) |>
+  arrange(desc(n), place) %>%
+  mutate(rank_n = nrow(.) - rank(n, ties.method = "min") + 1)
+
+d_rank_cy <- d_nourishment |>
+  count(place, wt = volume_cy, name = "cy") |>
+  arrange(desc(cy), place) %>%
+  mutate(rank_n = nrow(.) - rank(cy, ties.method = "min") + 1)
+
+d_rank_total_cost <- d_nourishment |>
+  count(place, wt = adjusted_cost_2022, name = "total_cost_2022") |>
+  arrange(desc(total_cost_2022), place) %>%
+  mutate(rank_n = nrow(.) - rank(total_cost_2022) + 1)
+
+
+###### Location data
+
+d_beach_locations <- read_xlsx(here("data/raw/beach-coordinates-geonames-dmoul.xlsx"),
+                               skip = 3) |>
+  mutate(across(where(is.character), ~ map_chr(.x, iconv, "UTF-8", "UTF-8", sub=''))) |> # just in case
+  filter(!is.na(longitude),
+         !is.na(latitude)) |>
+  mutate(place = str_trim(str_to_title(str_extract(place, "([[:alpha:]][[:space:]]?)+"))),
+         place = case_when(
+           str_detect(place, "Topsail")                   ~ "Topsail",
+           place == "Cape Hatteras"                       ~ "Hatteras Island",
+           place == "Emerald Isle Point"                  ~ "Emerald Isle",
+           str_detect(place, "Figure Eight")              ~ "Figure Eight Island", # get rid of north end / south end
+           .default = place
+         )) |> 
+  distinct(place, .keep_all = TRUE) |>
+  st_as_sf(coords = c("longitude", "latitude"),
+           crs = "WGS84")
+  
+         
+nc_coast_bbox <- st_bbox(d_beach_locations)
+
+d_combined <- left_join(d_beach_locations, d_nourishment,
+                        by = "place") |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         )
+
+year_first <- min(d_combined$year_completed)
+year_last <- max(d_combined$year_completed)
+n_all_episodes <- nrow(d_combined)
+
+d_combined_with_est <- d_combined |>
+  st_drop_geometry() |>
+  mutate(adjusted_cost_2022 = if_else(adjusted_cost_2022 == 0,
+                                    NA,
+                                    adjusted_cost_2022),
+         adjusted_cost_cy = if_else(adjusted_cost_cy == 0 | adjusted_cost_cy > 100,
+                                    NA,
+                                    adjusted_cost_cy),
+         length_ft = if_else(length_ft == 0,
+                                    NA,
+                                    length_ft)
+         ) |>
+  mutate(med_adjusted_cost_2022 = median(adjusted_cost_2022, na.rm = TRUE),
+         med_adjusted_cost_cy = median(adjusted_cost_cy, na.rm = TRUE),
+         med_length_ft = median(length_ft, na.rm = TRUE),
+         .by = place) |>
+  mutate(adjusted_cost_2022_new = med_adjusted_cost_cy * volume_cy,
+         pct_dif_adjusted_cost_2022_est = adjusted_cost_2022_new / med_adjusted_cost_2022,
+         pct_dif_adjusted_cost_2022 = adjusted_cost_2022_new / adjusted_cost_2022) |>
+  # Now choose best cost estimate
+  mutate(adjusted_cost_2022_est = if_else(is.na(adjusted_cost_2022),
+                                          adjusted_cost_2022_new,
+                                          adjusted_cost_2022),
+         adjusted_cost_cy_est = if_else(is.na(adjusted_cost_cy),
+                                          med_adjusted_cost_cy,
+                                          adjusted_cost_cy),
+         est_cost = if_else(is.na(adjusted_cost_2022),
+                            "Y",
+                            "")
+  ) |>
+  # While we're at it, we will need length estimates too
+  mutate(length_ft_est = if_else(is.na(length_ft),
+                                 med_length_ft,
+                                 length_ft),
+         est_length = if_else(is.na(length_ft),
+                            "Y",
+                            ""),
+  )
+
+n_episodes <- nrow(d_combined)
+n_episodes_cost_missing <- d_combined_with_est |>
+  filter(is.na(adjusted_cost_2022)) |>
+  nrow()
+pct_episodes_missing_cost <- percent(n_episodes_cost_missing / n_episodes)
+my_caption_missing_append <- glue("Estimated episode costs for {n_episodes_cost_missing}", 
+                                  " of {n_episodes} episodes ({pct_episodes_missing_cost})",
+                                  "\nindicated by the rug marks at bottom of plot")
+
+my_caption_missing_length_append <- glue("Includes estimated episode lengths where data is missing")
+
+
+volume_at_80pct <- quantile(d_combined$volume_cy, na.rm = TRUE,
+                            probs = 0.8)
+length_at_80pct <- quantile(d_combined_with_est$length_ft_est, na.rm = TRUE,
+                            probs = 0.8)
+
+
+##### County boundaries
+
+# v2020 <- tidycensus::load_variables(year = 2020,
+#                                     dataset = "pl")
+
+d_raw_county <- tidycensus::get_decennial(geography = "county",
+                                          variables = "P1_001N",
+                                          year = 2020,
+                                          state = "NC",
+                                          geometry = TRUE) |>
+  st_transform(crs = "WGS84")
+
+
+###### Coastline
+
+d_nc_border <- st_union(d_beach_locations)
+
+fname <- here("data/raw/noaa-shoreline/gshhg-shp-2.3.7/GSHHS_shp/h/")
+d_raw_h1 <- st_read(fname,
+                   layer = "GSHHS_h_L1",
+                   quiet = TRUE)
+d_raw_h2 <- st_read(fname,
+                   layer = "GSHHS_h_L2",
+                   quiet = TRUE)
+
+
+bbox_eps <- 0.1 # degrees
+
+my_xmin = min(st_coordinates(d_nc_border)[, 1]) - bbox_eps
+my_xmax = max(st_coordinates(d_nc_border)[, 1]) + 100 * bbox_eps
+my_ymin = min(st_coordinates(d_nc_border)[, 2]) - 10 * bbox_eps
+my_ymax = max(st_coordinates(d_nc_border)[, 2]) + bbox_eps
+
+plot_bbox <- st_bbox(c(xmin = my_xmin, xmax = my_xmax, ymax = my_ymax, ymin = my_ymin), 
+                     crs = st_crs("WGS84")
+                     )
+
+plot_bbox <- st_bbox(c(xmin = -79, xmax = -70, ymax = 36.8, ymin = 32), 
+                     crs = st_crs("WGS84")
+                     )
+
+nc_coastline <- st_crop(d_raw_h1, plot_bbox)
+# nc_rivers <- st_crop(d_raw_h2, plot_bbox) # doesn't include enough river data for NC
+
+nc_counties <- st_crop(d_raw_county, plot_bbox)
+
+###### Counts
+
+d_combined_count <- count(d_combined, place)
+
+d_combined_volume_cy <- d_combined |>
+  filter(!is.na(volume_cy)) |>
+  count(place, wt = volume_cy,
+        name = "total_volume_cy")
+
+n_missing_costs <- d_combined |>
+  filter(adjusted_cost_2022 == 0) |>
+  nrow()
+
+```
+
+The data set includes `r nrow(d_combined)` nourishment episodes on or near ocean shorelines in North Carolina from `r min(d_combined$year_completed)` through sometime in the first half of `r max(d_combined$year_completed)` (I downloaded the data on 2024-07-05). While the costs for a minority of episodes (`r n_missing_costs`, 
+`r round(100 * n_missing_costs / nrow(d_combined))`%) are not in the data set, the cumulative cost in 2022 dollars for the events that include costs is \$`r round(sum(d_combined$adjusted_cost_2022) / 1e9, digits = 1)`B. Using estimates for the missing costs, I estimate the cumulative cost to be $`r round(sum(d_combined_with_est$adjusted_cost_2022_est) / 1e9, digits = 1)`B.
+
+## How much sand, how much money, and with what justifications?
+
+Episodes were distributed along nearly the whole length of NC coastline. Carolina Beach, one of the older beach communities, received 32 nourishment episodes delivering over 20M cubic yards--more than any other place. See the summary @tbl-all-places-with-cy-distributions.^[Note that I combined some locations in the source data as described in @sec-simplifying-categories Simplifying Categories.]
+
+### Volume of beach nourishment episodes
+
+```{r}
+#| label: fig-volume-cy
+#| fig-cap: "NC beach nourishment map"
+#| fig-height: 10
+#| fig-width: 10
+#| warning: false
+#| message: false
+
+d_combined_volume_cy |>
+  ggplot() +
+  geom_sf(data = nc_coastline,
+          alpha = 1) +
+  geom_sf(data = nc_counties,
+          linewidth = 0.05,
+          color = "grey40",
+          fill = NA,
+          alpha = 0.1) +
+  geom_sf(aes(size = total_volume_cy), 
+          color = "firebrick",
+          alpha = 0.4) +
+  geom_text_repel(
+    aes(label = place, geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 1,
+    force = 20,
+    max.overlaps = 20,
+    seed = 9999
+  ) +
+  coord_sf(xlim = c(NA, -74.8)) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_size_continuous(range = c(4, 20),
+                        labels = label_number(scale_cut = cut_short_scale())
+  ) +
+  guides(size = guide_legend(position = "inside")) +
+  theme(axis.title = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_rect(fill = "#00008B33"),
+        legend.position.inside = c(0.1, 0.8),
+        legend.key = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"),) +
+  labs(
+    title = glue("The data set includes {n_all_episodes} beach nourishment epsiodes in NC", 
+                 "\nbetween {year_first} and the first half of {year_last}",
+                 "\nmoving nearly {round(sum(d_combined_volume_cy$total_volume_cy) / 1e6)} million cubic yards of sand"),
+    caption = my_caption_geo
+  )
+
+```
+
+<br>
+
+I distinguish three three place clusters based on their first beach nourishment episode as seen in @fig-volume-cy-by-place:
+
+* Some early beach communities started nourishment before 1980 including Carolina Beach, Wrightsville Beach, and Atlantic Beach
+* The majority started nourishment in the eighties, nineties or early 2000s
+* Some places started nourishment since 2018, mainly funded locally, and probably at least in part in response to [Hurricane Florence](https://en.wikipedia.org/wiki/Hurricane_Florence)
+
+```{r}
+#| label: fig-volume-cy-by-place
+#| fig-cap: "Cumulative volume by place"
+#| fig-height: 6
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot <- d_combined_with_est |>
+  select(place, year_completed, volume_cy, primary_funding_source) |>
+  arrange(place, year_completed) |>
+  mutate(n_episodes = n(),
+         idx = row_number(),
+         cum_cy = cumsum(volume_cy),
+         .by = place)
+
+dta_for_plot_labels <- dta_for_plot |>
+  slice_max(order_by = cum_cy,
+            n = 1,
+            by = place) |>
+  slice_max(order_by = cum_cy,
+            n = 10) |>
+  mutate(plot_label = glue("{place} ({idx})"))
+
+p1 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cum_cy, group = place)) +
+  geom_vline(xintercept = c(1980, 2015), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  geom_line(linewidth = 0.15,
+            alpha = 0.6) +
+  geom_point(aes(color = primary_funding_source),
+             size = 1.5, alpha = 0.6) +
+  geom_text(data = dta_for_plot_labels,
+            aes(x = year_completed + 2,
+                y = cum_cy,
+                label = plot_label),
+            hjust = 0,
+            size = 2,
+            check_overlap = TRUE) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous() +
+  expand_limits(x = 2040) +
+  guides(color = guide_legend(override.aes = list(size = 4),
+                              position = "inside")) +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  labs(
+    subtitle = "A: Cumulative volume by place",
+    x = NULL,
+    y = "Volume (cubic yards)",
+    color = "Primary funding\nsource"
+  )
+
+p2 <- d_combined_with_est |>
+  summarize(year_first = min(year_completed),
+            year_last = max(year_completed),
+            n_episodes  = n(),
+            total_volume_cy = sum(volume_cy),
+            .by = place) |>
+  mutate(place_label = glue("{place} ({n_episodes})"),
+         place_label = fct_reorder(place_label, n_episodes)) |>
+  ggplot() +
+  geom_vline(xintercept = c(1980, 2015), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  geom_segment(aes(x = year_first, xend = year_last, y = place_label),
+             alpha = 0.5, linewidth = 0.2) +
+  geom_point(aes(x = year_first, y = place_label),
+             alpha = 0.5, color = "dodgerblue", size = 2) +
+  geom_point(aes(x = year_last, y = place_label),
+             alpha = 0.5, color = "firebrick", size = 2) +
+  labs(
+    subtitle = "B: First and last year of nourishment",
+    x = NULL,
+    y = NULL
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = "The oldest beach communities have received the most episodes\nand most volume of beach nourishment",
+    caption = my_caption
+  )
+  
+```
+
+I see that all of the privately funded nourishment episodes were for the private gated [Figure Eight Island](https://en.wikipedia.org/wiki/Figure_Eight_Island).
+
+<br>
+
+Eighty percent of the episodes delivered volumes of less than `r paste0(round(volume_at_80pct / 1000), "K")` cubic yards (panel C). Nags Head and Atlantic Beach are notable outliers (panel A).
+
+```{r}
+#| label: fig-volume-per-episode
+#| fig-cap: "Volume per episode with median and average volume for each place"
+#| fig-height: 6
+#| fig-width: 8
+#| warning: false
+#| message: false
+#| column: page-right
+
+p1 <- d_combined_with_est |>
+  summarize(avg_volume_cy = mean(volume_cy),
+            med_volume_cy = median(volume_cy),
+            n_episodes  = n(),
+            total_volume_cy = sum(volume_cy),
+            .by = place) |>
+  mutate(place_label = glue("{place} ({n_episodes})"),
+         place_label = fct_reorder(place_label, n_episodes)) |>
+  ggplot() +
+  geom_segment(aes(x = avg_volume_cy, xend = med_volume_cy, y = place_label),
+             alpha = 0.5, linewidth = 0.2) +
+  geom_point(aes(x = med_volume_cy, y = place_label),
+             alpha = 0.5, color = "dodgerblue", size = 2) +
+  geom_point(aes(x = avg_volume_cy, y = place_label),
+             alpha = 0.5, color = "firebrick", size = 2) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  scale_size_continuous(breaks = c(1, 10, 20, 30)) +
+  expand_limits(x = 0) +
+  labs(
+    subtitle = "A: Median (blue) average (red) volume",
+    x = "Volume (cubic yards)",
+    y = NULL
+  )
+
+p2 <- d_combined_with_est |>
+  ggplot() +
+  geom_density(aes(x = volume_cy),
+             alpha = 0.5, linewidth = 0.2) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  theme(axis.text.y = element_blank()) +
+  labs(
+    subtitle = "B: Density of episode volumes",
+    x = "Volume (cubic yards)",
+    y = NULL
+  )
+
+p3 <- d_combined_with_est |>
+  ggplot() +
+  stat_ecdf(aes(x = volume_cy),
+             alpha = 0.5, linewidth = 0.2) +
+  annotate("point", x = volume_at_80pct, y = 0.8, size = 2, color = "firebrick", alpha = 0.6) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_percent(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    subtitle = "C: Distribution of episode volumes",
+    x = "Volume (cubic yards)",
+    y = "Percent of all episodes"
+  )
+
+p1 + (p2 / p3) +
+  plot_annotation(
+    title = "Episode volumes",
+    caption = my_caption
+  )
+
+```
+
+<br>
+
+### Length of beach nourishment episodes
+
+Eighty percent of the episodes delivered nourishment along less than about `r paste0(round(length_at_80pct / 1000), "K")` linear feet, which is `r round(length_at_80pct / 5280, digits = 1)` miles (panel C). Nags Head and Pine Knoll Shores are notable outliers (panel A).
+
+```{r}
+#| label: fig-length-per-episode
+#| fig-cap: "Length of shoreline nourished per episode with median and average for each place"
+#| fig-height: 6
+#| fig-width: 8
+#| warning: false
+#| message: false
+#| column: page-right
+
+p1 <- d_combined_with_est |>
+  summarize(avg_length_ft = mean(length_ft_est),
+            med_length_ft = median(length_ft_est),
+            n_episodes  = n(),
+            total_length_ft = sum(length_ft_est),
+            .by = place) |>
+  mutate(place_label = glue("{place} ({n_episodes})"),
+         place_label = fct_reorder(place_label, n_episodes)) |>
+  filter(!is.na(total_length_ft)) |>
+  ggplot() +
+  geom_segment(aes(x = avg_length_ft, xend = med_length_ft, y = place_label),
+             alpha = 0.5, linewidth = 0.2) +
+  geom_point(aes(x = med_length_ft, y = place_label),
+             alpha = 0.5, color = "dodgerblue", size = 2) +
+  geom_point(aes(x = avg_length_ft, y = place_label),
+             alpha = 0.5, color = "firebrick", size = 2) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  scale_size_continuous(breaks = c(1, 10, 20, 30)) +
+  expand_limits(x = 0) +
+  labs(
+    subtitle = "A: Median (blue) average (red) length",
+    x = "Length (feet)",
+    y = NULL
+  )
+
+p2 <- d_combined_with_est |>
+  ggplot() +
+  geom_density(aes(x = length_ft_est),
+             alpha = 0.5, linewidth = 0.2) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  theme(axis.text.y = element_blank()) +
+  labs(
+    subtitle = "B: Density of episode length",
+    x = "Length (feet)",
+    y = NULL
+  )
+
+p3 <- d_combined_with_est |>
+  ggplot() +
+  stat_ecdf(aes(x = length_ft_est),
+             alpha = 0.5, linewidth = 0.2) +
+  annotate("point", x = length_at_80pct, y = 0.8, size = 2, color = "firebrick", alpha = 0.6) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_percent(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    subtitle = "C: Distribution of episode length",
+    x = "Length (feet)",
+    y = "Percent of all episodes"
+  )
+
+p1 + (p2 / p3) +
+  plot_annotation(
+    title = "Episode lengths",
+    caption = paste0(my_caption, "\n", my_caption_missing_length_append)
+  )
+
+```
+
+<br>
+
+```{r}
+#| label: fig-length-by-place
+#| fig-cap: "Cumulative length by place"
+#| fig-height: 6
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot <- d_combined_with_est |>
+  select(place, year_completed, length_ft_est, primary_funding_source, justification) |>
+  arrange(place, year_completed) |>
+  mutate(n_episodes = n(),
+         idx = row_number(),
+         cum_length = cumsum(length_ft_est),
+         .by = place)
+
+dta_for_plot_labels <- dta_for_plot |>
+  slice_max(order_by = cum_length,
+            n = 1,
+            by = place) |>
+  slice_max(order_by = cum_length,
+            n = 10) |>
+  mutate(plot_label = glue("{place} ({idx})"))
+
+p1 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cum_length, group = place)) +
+  geom_vline(xintercept = c(1980, 2015), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  geom_line(linewidth = 0.15,
+            alpha = 0.6) +
+  geom_point(aes(color = primary_funding_source),
+             size = 1.5, alpha = 0.6) +
+  geom_text(data = dta_for_plot_labels,
+            aes(x = 2026,
+                y = cum_length,
+                label = plot_label),
+            hjust = 0,
+            size = 2,
+            check_overlap = TRUE) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous() +
+  expand_limits(x = 2040) +
+  guides(color = guide_legend(override.aes = list(size = 4),
+                              position = "inside")) +
+  theme(legend.position.inside = c(0.15, 0.8)) +
+  labs(
+    subtitle = "A: By primary funding source",
+    x = NULL,
+    y = "Length (linear feet)",
+    color = "Primary funding\nsource"
+  )
+
+p2 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cum_length, group = place)) +
+  geom_vline(xintercept = c(1980, 2015), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  geom_line(linewidth = 0.15,
+            alpha = 0.6) +
+  geom_point(aes(color = justification),
+             size = 1.5, alpha = 0.6) +
+  geom_text(data = dta_for_plot_labels,
+            aes(x = 2026,
+                y = cum_length,
+                label = plot_label),
+            hjust = 0,
+            size = 2,
+            check_overlap = TRUE) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous() +
+  expand_limits(x = 2040) +
+  guides(color = guide_legend(override.aes = list(size = 4),
+                              position = "inside")) +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  labs(
+    subtitle = "B: By justification",
+    x = NULL,
+    y = "Length (linear feet)",
+    color = "Justification"
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = "The oldest beach communities have received the most episodes\nand most linear feet of beach nourishment",
+    
+    caption = paste0(my_caption, "\n", my_caption_missing_length_append)
+  )
+  
+```
+
+<br>
+
+```{r}
+#| label: fig-length-by-volume
+#| fig-cap: "Length of shoreline nourished by volume"
+#| fig-height: 6
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+
+model1 <- d_combined_with_est |>
+  mutate(volume_cyk = volume_cy / 1000) |>
+  lm(length_ft_est ~ volume_cyk,
+     data = _) |>
+  broom::tidy()
+
+model1_estimate <- round(model1[2, 2], digits = 1)
+model1_std_error <- round(model1[2, 3], digits = 1)
+one_ft_volume <- round(1000 / model1_estimate)
+
+p1 <- d_combined_with_est |>
+  st_drop_geometry() |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         ) |>
+  ggplot(aes(x = volume_cy, y = length_ft_est)) +
+  geom_point(aes(size = adjusted_cost_2022_est,
+                 color = primary_funding_source),
+             alpha = 0.6,
+             show.legend = TRUE) +
+  geom_smooth(method = 'lm', formula = 'y ~ x', se = TRUE,
+              span = 0.95) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.001, 0.02))) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  guides(color = "none") +
+  labs(
+    subtitle = "A: Linear volume scale",
+    x = "Volume",
+    y = "Length",
+    size = "Cost",
+    color = "Primary funding\nsource"
+  )
+
+p2 <- d_combined_with_est |>
+  st_drop_geometry() |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         ) |>
+  ggplot(aes(x = volume_cy, y = length_ft_est)) +
+  geom_point(aes(size = adjusted_cost_2022_est,
+                 color = primary_funding_source),
+             alpha = 0.6,
+             show.legend = TRUE) +
+  geom_smooth(method = 'lm', formula = 'y ~ x', se = FALSE,
+              span = 0.95) +
+  scale_x_log10(labels = label_number(scale_cut = cut_short_scale()),
+                expand = expansion(mult = c(0.001, 0.02))) +
+  scale_y_log10(labels = label_number(scale_cut = cut_short_scale()),
+                expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  labs(
+    subtitle = "B: Log10 volume scale",
+    x = "Volume",
+    y = NULL,
+    size = "Cost",
+    color = "Primary funding\nsource"
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = "What is the relationship between volume and length?",
+    subtitle = glue("For every 1000 cubic yards, {model1_estimate} ± {model1_std_error} feet of beach is nourished.",
+                    " In other words, on average about {one_ft_volume} cubic yards nourishes one linear foot of shoreline,",
+                    "\nhowever the range varies a lot."),
+    caption = paste0(my_caption, "\n", my_caption_missing_length_append)
+  ) +
+  plot_layout(
+    guides = "collect"
+  )
+
+```
+
+At some locations (example: Carolina Beach) there have been episodes of widely varying volume deposited on very similar lengths of beach while at other locations (example: Topsail beaches) it's the reverse. See @tbl-all-places-with-cy-distributions.
+
+<br>
+
+## What are the cost trends?
+
+Costs in constant dollars are going up.
+
+```{r}
+#| label: fig-yearly-cost-cumulative-with-estimates
+#| fig-cap: "Yearly cost by primary funding sources"
+#| fig-height: 6
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot <- d_combined_with_est |>
+  filter(year_completed < 2024) |> # remove partial year
+  arrange(year_completed) |>
+  summarize(cost = sum(adjusted_cost_2022_est),
+         .by = c(year_completed, primary_funding_source)) |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         )
+
+p1 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cost, color = primary_funding_source)) +
+  geom_point(alpha = 0.6,
+             show.legend = FALSE) +
+  geom_smooth(se = FALSE, method = 'loess', formula = 'y ~ x', span = 3.5,
+              alpha = 0.6,
+              show.legend = FALSE) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  guides(color = guide_legend(override.aes = list(linewidth = 3))) +
+  coord_cartesian(clip = "on", ylim = c(0, NA)) +
+  expand_limits(y = 0) +
+  labs(
+    subtitle = "View A",
+    x = NULL,
+    y = NULL,
+    color = "Primary funding\nsource"
+  )
+
+p2 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cost)) +
+  geom_col(aes(fill = primary_funding_source),
+           alpha = 0.6,
+           show.legend = TRUE) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  guides(color = guide_legend(override.aes = list(linewidth = 3))) +
+  coord_cartesian(clip = "on", ylim = c(0, NA)) +
+  expand_limits(y = 0) +
+  guides(fill = guide_legend(position = "inside")) +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  labs(
+    subtitle = "View B",
+    x = NULL,
+    y = NULL,
+    fill = "Primary funding\nsource"
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = glue("Yearly expendidures by federal, state and local governments are on an upward trend.", 
+    "\nSince 2000 local spending has grown significantly, and state spending is growing too."),
+    subtitle = glue("In 2022 dollars"), 
+    caption = paste0(my_caption, "\n", "Excluding 2024 since it's a partial year.", "\n", 
+                     "Including estimates for episodes lacking cost data.")
+  )
+  
+```
+
+<br>
+
+The cost per episode is going up (A), however this is not due to growth in the volume of episodes (B); rather it's due to an increase in cost per cubic yard (C). If number of episodes per year (D) had not declined in the latest years, overall costs would be higher (see @fig-total-cost-cumulative-with-estimates).
+
+Is the cost per volume increasing, because nourishment projects undertaken in recent years are more challenging (for example: greater distances between dredging and beaches)? Or are environmental regulations more expensive to comply with? Or is there limited competition among a small set of contractors bidding on nourishment projects? Or other reasons?
+
+And why have the number of episodes per year declined in the most recent years? Perhaps because a major hurricane has not hit NC since Florence in 2018. Are there other reasons?
+
+```{r}
+#| label: fig-four-panel-cost-story
+#| fig-cap: "Why costs have increased explained in four panels"
+#| fig-height: 10
+#| fig-width: 8
+#| warning: false
+#| message: false
+
+p1 <- d_combined |>
+  st_drop_geometry() |>
+  filter(adjusted_cost_2022 > 0,
+         adjusted_cost_cy < 100) |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         ) |>
+  ggplot(aes(x = year_completed, y = adjusted_cost_2022)) +
+  geom_point(aes(size = adjusted_cost_cy,
+                 color = primary_funding_source),
+             alpha = 0.6,
+             show.legend = TRUE) +
+  geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE,
+              span = 0.95) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  guides(color = "none") +
+  labs(
+    subtitle = "A: Cost per episode is going up",
+    x = NULL,
+    y = "Total cost",
+    size = "A: Cost/cy",
+    color = "Primary funding\nsource"
+  )
+
+p2 <- d_combined |>
+  st_drop_geometry() |>
+  filter(adjusted_cost_2022 > 0,
+         adjusted_cost_cy < 100) |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         ) |>
+  ggplot(aes(x = year_completed, y = volume_cy)) +
+  geom_point(aes(size = adjusted_cost_2022,
+                 color = primary_funding_source),
+             alpha = 0.6,
+             show.legend = TRUE) +
+  geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE,
+              span = 0.95) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  guides(color = "none") +
+  labs(
+    subtitle = "B: Volume per episode is relatively stable",
+    x = NULL,
+    y = "Volume (cubic yards)",
+    size = "B+C: Total cost",
+    color = "Primary funding\nsource"
+  )
+
+p3 <- d_combined |>
+  st_drop_geometry() |>
+  filter(adjusted_cost_2022 > 0,
+         adjusted_cost_cy < 100) |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         ) |>
+  ggplot(aes(x = year_completed, y = adjusted_cost_cy)) +
+  geom_point(aes(size = adjusted_cost_2022,
+                 color = primary_funding_source),
+             alpha = 0.6) +
+  geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE,
+              span = 0.95) +
+  scale_y_continuous(labels = label_dollar()) +
+  scale_size_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  labs(
+    subtitle = "C: Cost per cubic yard is going up",
+    x = NULL,
+    y = "Cost per cubic yard",
+    size = "B+C: Total cost",
+    color = "Primary funding\nsource"
+  )
+
+p4 <- d_combined_with_est |>
+  count(year_completed) |>
+  filter(year_completed < 2024) |> # remove partial year
+  ggplot(aes(x = year_completed, y = n)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE,
+              ) +
+  labs(
+    subtitle = "D: Episodes per year rose a lot after 2000 but has been declining more recently",
+    x = NULL,
+    y = "Count"
+  )
+
+p1 / p2 / p3 + p4 +
+  plot_annotation(
+    title = "Why are costs increasing?",
+    subtitle = "In 2022 dollars",
+    caption = paste0(my_caption, "\n", "Excluding episodes lacking costs in panels A-C")
+  ) +
+  plot_layout(
+    guides = "collect"
+  )
+  
+```
+
+<br>
+
+It's not simply the case that some places are just more expensive per unit volume.
+
+```{r}
+#| label: fig-cost-per-cy-by-place
+#| fig-cap: "Cost per cubic yard varies a lot"
+#| fig-height: 6
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+n_episode_cutoff <- 8
+
+dta_for_plot <- d_combined |>
+  st_drop_geometry() |>
+  filter(adjusted_cost_cy < 100,
+         adjusted_cost_cy > 0) |>
+  select(place, year_completed, volume_cy, adjusted_cost_cy, primary_funding_source) |>
+  arrange(place, year_completed) |>
+  mutate(n_episodes = n(),
+         idx = row_number(),
+         cum_cy = cumsum(volume_cy),
+         .by = place) |>
+  filter(n_episodes >= n_episode_cutoff)
+
+dta_for_plot_labels <- dta_for_plot |>
+  slice_max(order_by = cum_cy,
+            n = 1,
+            by = place) |>
+  mutate(plot_label = glue("{place} ({idx})"))
+
+p1 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = adjusted_cost_cy, color = place, group = place)) +
+  geom_line(linewidth = 0.15,
+            alpha = 0.6,
+            show.legend = FALSE) +
+  geom_point(size = 1.5, alpha = 0.6,
+            show.legend = FALSE) +
+  geom_text(data = dta_for_plot_labels,
+            aes(x = 2026,
+                y = adjusted_cost_cy,
+                label = plot_label),
+            hjust = 0,
+            size = 2,
+            check_overlap = TRUE,
+            show.legend = FALSE) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous() +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  expand_limits(x = 2040, y = 0) +
+  labs(
+    subtitle = "Lines connect the dots",
+    x =  NULL,
+    y = "Cost per cubic yard",
+    color = NULL
+  )
+
+p2 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = adjusted_cost_cy, color = place, group = place)) +
+  geom_smooth(linewidth = 0.15,
+            alpha = 0.6, se = FALSE, method = 'loess', formula = 'y ~ x',
+            show.legend = FALSE) +
+  geom_point(size = 1.5, alpha = 0.6,
+            show.legend = FALSE) +
+  geom_text(data = dta_for_plot_labels,
+            aes(x = 2026,
+                y = adjusted_cost_cy,
+                label = plot_label),
+            hjust = 0,
+            size = 2,
+            check_overlap = TRUE,
+            show.legend = FALSE) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous() +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  expand_limits(x = 2040, y = 0) +
+  labs(
+    subtitle = "Smothed lines",
+    x =  NULL,
+    y = "Cost per cubic yard",
+    color = NULL
+  )
+
+p1 + p2 + 
+  plot_annotation(
+    title = glue("Cost per cubic yard varies a lot"),
+    subtitle = "In 2022 dollars",
+    caption = paste0(my_caption, "\nExcludes episodes lacking cost data")
+  ) +
+  plot_layout(
+    guides = "collect",
+    axis_titles = "collect"
+  )
+  
+```
+
+<br>
+
+Private and state funders have been bit players. Will state expenditures continue to grow on current trend (@fig-yearly-cost-cumulative-with-estimates, @fig-total-cost-cumulative-with-estimates-shore-protection) in the years ahead? Should residents in the rest of the state pay for beach nourishment projects, which typically have only short term benefits, even though residents throughout the state (and beyond) travel to the beaches for vacation? Some level of investment can be justified on economic terms--the coastal economy is based on tourism--but how much?
+
+```{r}
+#| label: fig-total-cost-cumulative-with-estimates
+#| fig-cap: "Cumulative cost by primary funding sources"
+#| fig-height: 8
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+d_not_included <- d_combined |>
+  filter(adjusted_cost_2022 == 0) |>
+  mutate(cum_cost = 0)
+
+dta_for_plot <- d_combined_with_est |>
+  arrange(year_completed) |>
+  mutate(cum_cost = cumsum(adjusted_cost_2022_est),
+         .by = primary_funding_source) |>
+  mutate(primary_funding_source = factor(primary_funding_source, 
+                                         levels = c("Private", "Local", "State", "Federal"))
+         )
+
+p1 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cum_cost)) +
+  geom_area(aes(fill = primary_funding_source),
+           alpha = 0.6) +
+  geom_rug(data = d_not_included,
+           aes(x = year_completed, y = cum_cost, color = primary_funding_source),
+           sides = "b",
+           outside = TRUE,
+           alpha = 0.3,
+           position = position_jitter(),
+           show.legend = FALSE) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  guides(fill = guide_legend(position = "inside")) +
+  coord_cartesian(clip = "off") +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  labs(
+    subtitle = "A: Total cumulative", 
+    x = NULL,
+    y = NULL,
+    fill = "Primary funding\nsource"
+  )
+
+p2 <- dta_for_plot |>
+  ggplot(aes(x = year_completed, y = cum_cost)) +
+  geom_area(aes(fill = justification),
+           alpha = 0.6,
+           show.legend = TRUE) +
+  geom_rug(data = d_not_included,
+           aes(x = year_completed, y = cum_cost, color = justification),
+           sides = "b",
+           outside = TRUE,
+           alpha = 0.3,
+           position = position_jitter(),
+           show.legend = FALSE) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  facet_wrap( ~primary_funding_source) +
+  coord_cartesian(clip = "off") +
+  theme(legend.position = "top") +
+  labs(
+    subtitle = "B: Total cumulative by funding source", 
+    x = NULL,
+    y = NULL,
+    color = "Justification",
+    fill = "Justification"
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = glue("Most funding comes from federal sources",
+                 "\nwhile local sources have grown a lot since about 2000"),
+    subtitle = glue("Estimated cumulative cost in 2022 dollars"),
+    caption = paste0(my_caption, "\n", my_caption_missing_append)
+  )
+  
+```
+
+<br>
+
+The relatively small amounts of state funding have gone to different communities each time:
+
+```{r}
+d_combined_with_est |>
+  st_drop_geometry() |>
+  select(place, year_completed, primary_funding_source, justification, adjusted_cost_2022_est, est_cost, volume_cy) |>
+  filter(primary_funding_source == "State") |>
+  arrange(year_completed) |>
+  select(-primary_funding_source) |>
+  gt() |>
+  tab_header(md("**State funding**")) |>
+  tab_options(table.font.size = 10) |>
+  fmt_currency(columns = adjusted_cost_2022_est, 
+               decimals = 0,
+               suffixing = TRUE) |>
+  fmt_number(columns = volume_cy,
+             decimals = 0,
+             suffixing = TRUE) |>
+  cols_align(columns = est_cost,
+             align = "center") |>
+  sub_missing(columns = everything())
+```
+
+<br>
+
+It makes sense to me that the federal government is funding navigation improvements, since it has [constitutional obligations](https://law.justia.com/constitution/us/article-1/33-congressional-regulation-of-waterways.html) related to interstate commerce and the regulation of waterways.
+
+More surprising is the growth of locally-funded shore protection episodes, which in 30 years has nearly reached what the federal government spent in the last 80 years. Can this continue? What stress is this putting on local community budgets and balance sheets? How are they paying for it? Will the trend continue? What if communities reach their capacity to spend?
+
+```{r}
+#| label: fig-total-cost-cumulative-with-estimates-shore-protection
+#| fig-cap: "Cumulative cost for shore protection and navigation"
+#| fig-height: 8
+#| fig-width: 12
+#| warning: false
+#| message: false
+#| column: page-right
+
+d_not_included <- d_combined |>
+  filter(adjusted_cost_2022 == 0) |>
+  mutate(cum_cost = 0)
+
+dta_for_plot <- d_combined_with_est |>
+  arrange(year_completed) |>
+  mutate(cum_cost = cumsum(adjusted_cost_2022_est),
+         .by = c(justification, primary_funding_source)) |>
+  mutate(primary_funding_source = factor(primary_funding_source,
+                                         levels = c("Private", "Local", "State", "Federal"))
+         )
+
+p1 <- dta_for_plot |>
+  filter(justification == "Navigation") |>
+  ggplot(aes(x = year_completed, y = cum_cost)) +
+  geom_line(aes(fill = primary_funding_source, color = primary_funding_source, group = primary_funding_source),
+           alpha = 0.6,
+           show.legend = FALSE) +
+  geom_rug(data = d_not_included,
+           aes(x = year_completed, y = cum_cost, color = primary_funding_source),
+           sides = "b",
+           outside = TRUE,
+           alpha = 0.3,
+           position = position_jitter(),
+           show.legend = FALSE) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(clip = "off") +
+  labs(
+    subtitle = "A: Navigation", 
+    x = NULL,
+    y = NULL,
+    fill = "Primary funding\nsource",
+  )
+
+p2 <- dta_for_plot |>
+  filter(justification == "Shore Protection") |>
+  ggplot(aes(x = year_completed, y = cum_cost)) +
+  geom_line(aes(fill = primary_funding_source, color = primary_funding_source, group = primary_funding_source),
+           alpha = 0.6) +
+  geom_rug(data = d_not_included,
+           aes(x = year_completed, y = cum_cost, color = primary_funding_source),
+           sides = "b",
+           outside = TRUE,
+           alpha = 0.3,
+           position = position_jitter()) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale()),
+                     expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(clip = "off") +
+  guides(color = guide_legend(position = "inside",
+                              override.aes = list(linewidth = 3))) +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  labs(
+    subtitle = "B: Shore Protection", 
+    x = NULL,
+    y = NULL,
+    color = "Primary funding\nsource"
+  )
+
+p1 + p2 +
+  plot_annotation(
+    title = glue("Nearly all funding for (A) navigation improvements is federal",
+                 "\nwhile cumulative local funding for (B) shore protection", 
+                 "\nhas nearly reached the federal level.", 
+                 "\nAnd the state of NC recently started funding shore protection too"),
+    subtitle = glue("Estimated cumulative cost in 2022 dollars"), 
+    caption = paste0(my_caption, "\n", my_caption_missing_append)
+  )
+  
+```
+
+<br>
+
+The number of "emergency" episodes has been increasing too.
+
+```{r}
+#| label: fig-emergency-count
+#| fig-cap: "There are more, larger emergency beach nourishment projects"
+#| fig-height: 6
+#| fig-width: 8
+
+d_combined_with_est |>
+  st_drop_geometry() |>
+  filter(year_completed < 2024) |> # drop partial year
+  summarize(n = n(),
+            volume_cy = sum(volume_cy),
+            .by = year_completed) |>
+  ggplot(aes(x = year_completed, y = n)) +
+  geom_point(aes(size = volume_cy),
+             color = "firebrick",
+             alpha = 0.6) +
+  geom_smooth(se = FALSE, method = 'loess', formula = 'y ~ x',
+              show.legend = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_size_continuous(labels = label_number(scale_cut = cut_short_scale()),
+                        breaks = c(1, 2.5, 5, 7.5) * 1e6) +
+  expand_limits(y = 0) +
+  guides(size = guide_legend(position = "inside")) +
+  theme(legend.position.inside = c(0.1, 0.8)) +
+  labs(
+    title = "There are more, larger emergency\nbeach nourishment projects since around 2000",
+    x = NULL,
+    y = "Count",
+    caption = my_caption
+  )
+```
+
+<br>
+
+The details:
+
+```{r}
+#| label: tbl-emergency-count
+
+d_combined_with_est |>
+  st_drop_geometry() |>
+  select(place, year_completed, primary_funding_source, justification, adjusted_cost_2022_est, 
+         est_cost, volume_cy, length_ft_est, est_length) |>
+  filter(justification == "Emergency") |>
+  arrange(year_completed) |>
+  select(-justification) |>
+  gt() |>
+  tab_header(md("**Emergency projects**")) |>
+  tab_options(table.font.size = 10) |>
+  fmt_currency(columns = adjusted_cost_2022_est, 
+               decimals = 1,
+               suffixing = FALSE,
+             scale_by = 1e-6,
+             pattern = "{x}M"
+             ) |>
+  fmt_number(columns = c(volume_cy, length_ft_est),
+             decimals = 0,
+             suffixing = FALSE,
+             scale_by = 1e-3,
+             pattern = "{x}K"
+             ) |>
+  cols_align(columns = est_cost,
+             align = "center") |>
+  sub_missing(columns = everything())
+
+```
+
+<br>
+
+## Appendix
+
+All places and episodes
+
+```{r}
+#| label: tbl-all-places-with-cy-distributions
+#| tbl-cap: All places and episodes with volume and length distributions for each place
+
+episode_all <- d_combined_with_est |>
+  st_drop_geometry() |>
+  reframe(n_episodes = n(),
+          volume_cy = sum(volume_cy, na.rm = TRUE),
+          length_ft = sum(length_ft_est, na.rm = TRUE),
+          .by = place) |>
+  arrange(desc(n_episodes), desc(volume_cy))
+
+episode_all_distribution <- d_combined_with_est |>
+  st_drop_geometry() |>
+  summarize(volume_cy_dist = list(volume_cy),
+            length_ft_dist = list(length_ft_est),
+            .by = place)
+
+dta_for_table_tmp <- left_join(episode_all, episode_all_distribution,
+                           by = "place")
+
+dta_for_table_tmp |>
+  rows_append(tibble(place = "Total",
+                     n_episodes = sum(dta_for_table_tmp$n_episodes),
+                     volume_cy = sum(dta_for_table_tmp$volume_cy),
+                     length_ft = sum(dta_for_table_tmp$length_ft)
+                     )) |>
+  gt() |>
+  tab_header(md(glue("**All places and episodes**<br>with distribution of volume (cubic yards)", 
+                     " and length (feet)<br>for each place's episodes"))) |>
+  tab_options(table.font.size = 10) |>
+  fmt_number(columns = contains("volume_cy"),
+             decimals = 1,
+             scale_by = 1e-6,
+             pattern = "{x}M") |>
+  fmt_number(columns = contains("length_ft"),
+             decimals = 0,
+             scale_by = 1e-3,
+             pattern = "{x}K") |>
+  gt_plt_dist(column = volume_cy_dist) |>
+  gt_plt_dist(column = length_ft_dist)
+  
+```
+
+For those figures in which I estimated costs for one or more episodes (@fig-total-cost-cumulative-with-estimates, @fig-total-cost-cumulative-with-estimates-shore-protection) there is more detail below. The episodes missing costs were below average  volume for nearly all places.
+
+```{r}
+#| label: tbl-missing-total-cost-with-barcharts
+#| tbl-cap: Places with episodes that don't include costs
+
+episode_no_costs <- d_not_included |>
+  st_drop_geometry() |>
+  reframe(n_episodes = n(),
+          volume_cy = sum(volume_cy),
+          .by = place) |>
+  arrange(desc(n_episodes))
+
+episode_all <- d_combined |>
+  st_drop_geometry() |>
+  reframe(total_n_episodes = n(),
+          total_volume_cy = sum(volume_cy),
+          .by = place) |>
+  arrange(desc(total_n_episodes))
+
+dta_for_table_tmp <- left_join(episode_no_costs, episode_all,
+                           by = "place")
+
+dta_for_table_tmp |>
+  rows_append(tibble(place = "Total",
+                     n_episodes = sum(dta_for_table_tmp$n_episodes),
+                     volume_cy = sum(dta_for_table_tmp$volume_cy),
+                     total_n_episodes = sum(dta_for_table_tmp$total_n_episodes),
+                     total_volume_cy = sum(dta_for_table_tmp$total_volume_cy)
+                     )) |>
+  mutate(pct_episodes = 100 * n_episodes / total_n_episodes,
+         pct_volume = 100 * volume_cy / total_volume_cy) |>
+  gt() |>
+  tab_header(md("**Places with at least one episode missing cost data**")) |>
+  tab_options(table.font.size = 10) |>
+  fmt_number(columns = contains("volume_cy"),
+             decimals = 0) |>
+  gt_plt_bar_pct(column = pct_episodes, 
+                 scaled = TRUE, fill = "forestgreen", labels = TRUE,
+                 width = 25) |>
+  gt_plt_bar_pct(column = pct_volume, 
+             scaled = TRUE, fill = "forestgreen", labels = TRUE,
+             width = 25) |>
+  tab_spanner(
+    label = "Episodes missing costs",
+    columns = c(n_episodes, volume_cy)
+  ) |>
+  tab_spanner(
+    label = "All episodes for place",
+    columns = c(total_n_episodes, total_volume_cy)
+  ) |>
+  tab_spanner(
+    label = "Percent missing",
+    columns = c(pct_episodes, pct_volume)
+  )
+  
+```
+
+<br>
+
+### How good are the cost estimates?
+
+Where total cost and median cost are missing, `volume_cy` is typically available (and varies considerably among each place's episodes). So using $median(cost\_cy) * volume\_cy$ for each place (pct_diff_med_cy_cost_times_cy) is a better estimate than simply using $median(cost)$ for each place (pct_diff_med_cost).
+
+As an error check, the following plots compare the two estimation methods with the actual costs for those episodes that include costs  (and thus in these cases I did not use estimated values in plots above). I assume the performance of the estimators is similar for episodes lacking cost data.
+
+```{r}
+#| label: fig-estimation-error-check
+#| fig-cap: "The selected method of cost estimation is good enough"
+#| fig-height: 6
+#| fig-width: 8
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot <- d_combined_with_est |>
+  select(place, year_completed, adjusted_cost_2022, adjusted_cost_cy, med_adjusted_cost_2022, med_adjusted_cost_cy, 
+         adjusted_cost_2022_new) |>
+  filter(!is.na(adjusted_cost_2022),
+         !is.na(adjusted_cost_cy)) |>
+  mutate(pct_diff_med_cost = (med_adjusted_cost_2022 - adjusted_cost_2022) / adjusted_cost_2022,
+         pct_diff_med_cy_cost_times_cy = (adjusted_cost_2022_new - adjusted_cost_2022) / adjusted_cost_2022
+) |>
+  pivot_longer(cols = contains("pct_diff"),
+               names_to = "pct",
+               values_to = "value")
+
+d_fun_a <- dta_for_plot |>
+  filter(pct == "pct_diff_med_cy_cost_times_cy") |>
+  pull(value) |>
+  ecdf()
+prob_a <- d_fun_a(1) - d_fun_a(-1)
+
+d_fun_b <- dta_for_plot |>
+  filter(pct == "pct_diff_med_cost") |>
+  pull(value) |>
+  ecdf()
+prob_b <- d_fun_b(1) - d_fun_b(-1)
+
+p1 <- dta_for_plot |>
+  ggplot() +
+  geom_vline(xintercept = c(-1, 0, 1), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  geom_density(aes(value, color = pct, fill = pct),
+               alpha = 0.1,
+               show.legend = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.005, 0.02))) +
+  scale_color_manual(values = c("firebrick", "dodgerblue")) +
+  coord_cartesian(xlim = c(NA, 10)) +
+  theme(legend.position = "bottom") +
+  labs(
+    subtitle = "A: Density",
+    x = "Difference in estimate and original data as percent of original data",
+    y = "Density"
+  )
+
+p2 <- dta_for_plot|>
+  ggplot() +
+  geom_vline(xintercept = c(-1, 0, 1), 
+             lty = 2, linewidth = 0.15, alpha = 0.5) +
+  stat_ecdf(aes(value, color = pct),
+            pad = FALSE,
+            alpha = 1) +
+  scale_y_continuous(expand = expansion(mult = c(0.005, 0.02)),
+                     labels = label_percent()) +
+  scale_color_manual(values = c("firebrick", "dodgerblue")) +
+  guides(color = guide_legend(override.aes = list(linewidth = 3))) +
+  coord_cartesian(xlim = c(NA, 10)) +
+  expand_limits(y = 0) +
+  theme(legend.position = "bottom") +
+  labs(
+    subtitle = "B: ECDF",
+    x = "Difference in estimate and original data as percent of original data",
+    y = "Percent of all episodes\nwithout missing data"
+  )
+
+caption_extra2 <- glue("\nPlots truncated to make them more readible (`pct_diff_med_cost` extends to 40x).")
+
+p1 + p2 + 
+  plot_annotation(
+    title = glue("The selected estimation method is good enough",
+                 "\nand is superior to a simpler method I used initially"),
+    subtitle = glue("Selected method captures {percent(prob_a)} of the episode values within ±1.", 
+                    "\nand avoids large errors present when using median episode cost.",
+                    "\nMedian episode cost captures {percent(prob_b)} and generates more extreme outliers.", 
+                    "\nDashed lines are ±1 a.k.a. estimate off by 100%."),
+    caption = paste0(my_caption, "\n", caption_extra2)
+  ) +
+  plot_layout(guides = "collect",
+              axes = "collect") &
+  theme(legend.position = "bottom")
+
+```
+
+<br>
+
+```{r}
+#| include: false
+
+knitr::knit_exit()
+
+```
+
