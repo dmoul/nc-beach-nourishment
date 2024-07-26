@@ -15,6 +15,7 @@ library(gtExtras) # also loads svglite
 library(patchwork)
 library(sf)
 library(ggrepel)
+library(ggbump)
 library(tidycensus)
 library(broom) # for tidy()
 
@@ -287,7 +288,7 @@ d_combined_volume_cy |>
 
 <br>
 
-I distinguish three three place clusters based on their first beach nourishment episode as seen in @fig-volume-cy-by-place:
+I distinguish three three location clusters by their first beach nourishment episode as seen in @fig-volume-cy-by-place:
 
 * Some early beach communities started nourishment before 1980 including Carolina Beach, Wrightsville Beach, and Atlantic Beach
 * The majority started nourishment in the eighties, nineties or early 2000s
@@ -297,7 +298,7 @@ I distinguish three three place clusters based on their first beach nourishment 
 #| label: fig-volume-cy-by-place
 #| fig-cap: "Cumulative volume by place"
 #| fig-height: 6
-#| fig-width: 12
+#| fig-width: 8
 #| warning: false
 #| message: false
 #| column: page-right
@@ -318,7 +319,7 @@ dta_for_plot_labels <- dta_for_plot |>
             n = 10) |>
   mutate(plot_label = glue("{place} ({idx})"))
 
-p1 <- dta_for_plot |>
+dta_for_plot |>
   ggplot(aes(x = year_completed, y = cum_cy, group = place)) +
   geom_vline(xintercept = c(1980, 2015), 
              lty = 2, linewidth = 0.15, alpha = 0.5) +
@@ -339,44 +340,83 @@ p1 <- dta_for_plot |>
   expand_limits(x = 2040) +
   guides(color = guide_legend(override.aes = list(size = 4),
                               position = "inside")) +
-  theme(legend.position.inside = c(0.2, 0.8)) +
+  theme(legend.position.inside = c(0.15, 0.8)) +
   labs(
-    subtitle = "A: Cumulative volume by place",
+    title = glue("In general, the beach communities receiving", 
+                 "\nthe most episodes received the most", 
+                 "\ncumulative volume of beach nourishment"),
+    subtitle = "Once you start it's hard to stop",
     x = NULL,
     y = "Volume (cubic yards)",
-    color = "Primary funding\nsource"
+    color = "Primary funding\nsource",
+    caption = my_caption
   )
+  
+```
 
-p2 <- d_combined_with_est |>
+<br>
+
+```{r}
+#| label: fig-volume-cy-by-place-TEST
+#| fig-cap: "Episodes and relative volume by place"
+#| fig-height: 8
+#| fig-width: 8
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot_tmp <- d_combined_with_est |>
+  select(place, year_completed, volume_cy, primary_funding_source) |>
+  arrange(place, year_completed) |>
+  mutate(n_episodes = n(),
+         idx = row_number(),
+         cum_cy = cumsum(volume_cy),
+         .by = place)
+
+dta_for_plot_summary <- dta_for_plot_tmp |>
   summarize(year_first = min(year_completed),
             year_last = max(year_completed),
             n_episodes  = n(),
             total_volume_cy = sum(volume_cy),
             .by = place) |>
   mutate(place_label = glue("{place} ({n_episodes})"),
-         place_label = fct_reorder(place_label, n_episodes)) |>
+         place_label = fct_reorder(place_label, n_episodes))
+  
+dta_for_plot_tmp |>
+  left_join(dta_for_plot_summary |>
+              select(place, place_label),
+            by = "place") |>
   ggplot() +
   geom_vline(xintercept = c(1980, 2015), 
              lty = 2, linewidth = 0.15, alpha = 0.5) +
-  geom_segment(aes(x = year_first, xend = year_last, y = place_label),
-             alpha = 0.5, linewidth = 0.2) +
-  geom_point(aes(x = year_first, y = place_label),
-             alpha = 0.5, color = "dodgerblue", size = 2) +
-  geom_point(aes(x = year_last, y = place_label),
-             alpha = 0.5, color = "firebrick", size = 2) +
+  geom_segment(data = dta_for_plot_summary,
+               aes(x = year_first, xend = year_last, y = place_label),
+  alpha = 0.5, linewidth = 0.2) +
+  geom_point(aes(x = year_completed, y = place_label, size = volume_cy, color = primary_funding_source),
+             alpha = 0.15) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.02))) +
+  scale_y_discrete(expand = expansion(mult = c(0.04, 0.04))) +
+  scale_size_continuous(range = c(1, 15),
+                        breaks = c(0.1e6, 1e6, 2e6, 3e6),
+                        labels = label_number(scale_cut = cut_short_scale())) +
+  guides(size = guide_legend(position = "inside"),
+         color = guide_legend(position = "inside",
+                              override.aes = list(size = 3))) +
+  theme(legend.position.inside = c(0.15, 0.35),
+        plot.title.position = "plot",
+        plot.subtitle.position = "plot") +
   labs(
-    subtitle = "B: First and last year of nourishment",
+    title = "There is a wide range in the number and size\nof beach nourishment episodes",
+    subtitle = "Timing and relative size of nourishment episodes",
     x = NULL,
-    y = NULL
-  )
-
-p1 + p2 +
-  plot_annotation(
-    title = "The oldest beach communities have received the most episodes\nand most volume of beach nourishment",
+    y = NULL,
+    size = "Volume\ncubic yards",
+    color = "Primary\nfunding source",
     caption = my_caption
   )
   
 ```
+
 
 I see that all of the privately funded nourishment episodes were for the private gated [Figure Eight Island](https://en.wikipedia.org/wiki/Figure_Eight_Island).
 
@@ -631,15 +671,16 @@ p1 + p2 +
 
 <br>
 
+There is a wide range of nourishment lengths and volumes--and their ratios (@fig-length-by-volume). At some locations (example: Carolina Beach) there have been episodes of widely varying volume deposited on very similar lengths of beach while at other locations (example: Topsail beaches) it's the reverse. See @tbl-all-places-with-cy-distributions.
+
 ```{r}
 #| label: fig-length-by-volume
-#| fig-cap: "Length of shoreline nourished by volume"
+#| fig-cap: "The relationship of length of shoreline nourished by volume"
 #| fig-height: 6
 #| fig-width: 12
 #| warning: false
 #| message: false
 #| column: page-right
-
 
 model1 <- d_combined_with_est |>
   mutate(volume_cyk = volume_cy / 1000) |>
@@ -717,7 +758,52 @@ p1 + p2 +
 
 ```
 
-At some locations (example: Carolina Beach) there have been episodes of widely varying volume deposited on very similar lengths of beach while at other locations (example: Topsail beaches) it's the reverse. See @tbl-all-places-with-cy-distributions.
+<br>
+
+The mix of justifications has shifted from mostly navigation to mostly shore protection.
+
+```{r}
+#| label: fig-justification-mix
+#| fig-cap: "Changing mix of justifications"
+#| fig-height: 6
+#| fig-width: 10
+#| warning: false
+#| message: false
+#| column: page-right
+
+dta_for_plot <- d_combined_with_est |>
+  select(place, year_completed, length_ft_est, primary_funding_source, justification) |>
+  mutate(decade = floor(year_completed / 10) * 10) |>
+  arrange(place, year_completed) |>
+  summarize(n_episodes = n(),
+            .by = c(decade, justification)) |>
+  mutate(pct_in_decade = n_episodes / sum(n_episodes),
+         .by = c(decade))
+
+dta_for_plot |>
+  ggplot(aes(x = decade, y = pct_in_decade, color = justification)) +
+  geom_bump(linewidth = 0.25,
+            show.legend = FALSE) +
+  geom_point(aes(size = n_episodes),
+             alpha = 0.6) +
+  scale_x_continuous(breaks = 1930 + 1:12 * 10,
+                     expand = expansion(mult = c(0.01, 0.04))) +
+  scale_y_continuous(labels = label_percent(),
+                     expand = expansion(mult = c(0.005, 0.02))) +
+  scale_size_continuous(range = c(1, 15),
+                        breaks = c(1, 10, 20, 30)) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  labs(
+    title = glue("Shore protection has replaced navigation", 
+                 "\nas the primary justification"),
+    subtitle = "Most 'emergency' episodes are probably shore protection too",
+    x = NULL,
+    y = "Percent of episodes in decade",
+    color = "Justification",
+    caption = paste0(my_caption, "\n", my_caption_missing_length_append)
+  )
+
+```
 
 <br>
 

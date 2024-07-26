@@ -4,7 +4,7 @@ project:
 book:
   title: "NC beach nourishment"
   author: Daniel Moul
-  date: today
+  date: "July 20, 2020"
   cover-image: "./images/freeman-park-beach-nc-IMG_1330.jpg"
   cover-image-alt: "Freeman Park Beach just north of Carolina Beach, North Carolina. March 2024. Photo: Daniel Moul."
   
